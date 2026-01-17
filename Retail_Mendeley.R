@@ -2,6 +2,7 @@
 library(dplyr)
 library(tidyr)
 library(purrr)
+library(lubridate) 
 
 # Reading in of raw data
 data <- read.csv("./Projekt/Data/Retail_Dataset_Mendeley.csv")
@@ -173,7 +174,8 @@ build_time_series <- function(df, warehouse = NULL, product_category = NULL,
 run_arima_analysis <- function(df, 
                                group_warehouse = TRUE, 
                                group_product_category = TRUE, 
-                               max_iter = 5) {
+                               period = 13, p_value_threshold = 0.05, max_iter = 5,
+                               lag_lb = 4) {
   
   # Determine grouping columns
   group_cols <- c()
@@ -200,7 +202,9 @@ run_arima_analysis <- function(df,
           wh <- if("Warehouse" %in% names(args)) args$Warehouse else NULL
           pc <- if("Product_Category" %in% names(args)) args$Product_Category else NULL
           
-          build_time_series(df, wh, pc, max_iter = max_iter)
+          build_time_series(df, wh, pc, period = period,
+                            p_value_threshold = p_value_threshold,
+                            max_iter = max_iter, lag_lb = lag_lb)
         }
       )
     ) %>%
@@ -215,17 +219,182 @@ run_arima_analysis <- function(df,
 
 # Grouping after Warehouse and Product Category by Date
 data_wh_pc <- data %>%
+  mutate(
+    # Woche beginnt Montag, Date = Montag der Woche
+    Date = floor_date(Date, unit = "week", week_start = 1)
+  ) %>%
   group_by(Warehouse, Product_Category, Date) %>%
   summarise(
-    Order_Demand = sum(Order_Demand),
+    Order_Demand = sum(Order_Demand, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Warehouse, Product_Category, Date)
+
+# --- Train/Test Split ---
+cutoff_date <- max(data_wh_pc$Date) - weeks(4)  # letzte 4 Wochen als Test
+
+train_data <- data_wh_pc %>% filter(Date <= cutoff_date)
+test_data  <- data_wh_pc %>% filter(Date > cutoff_date)
+
+# Set grouping flags
+group_warehouse <- TRUE
+group_product_category <- FALSE
+
+# --- Run ARIMA analysis on training data ---
+results <- run_arima_analysis(
+  train_data,
+  group_warehouse = group_warehouse,
+  group_product_category = group_product_category,
+  p_value_threshold = 0.8,
+  max_iter = 5,
+  lag_lb = 4
+)
+
+refit_and_forecast <- function(df, warehouse = NULL, product_category = NULL,
+                                      order, seasonal, h = 4, period = 13, level = 0.2) {
+  
+  # z-Score für Konfidenzintervall
+  z <- qnorm(0.5 + level / 2)
+  
+  # Filter für Warehouse / Product_Category
+  filtered_df <- df
+  if(!is.null(warehouse)) filtered_df <- filtered_df %>% filter(Warehouse == warehouse)
+  if(!is.null(product_category)) filtered_df <- filtered_df %>% filter(Product_Category == product_category)
+  
+  # Wochenaggregation
+  filtered_df <- filtered_df %>%
+    arrange(Date) %>%
+    mutate(Date = lubridate::floor_date(Date, "week")) %>%
+    group_by(Date) %>%
+    summarise(Order_Demand = sum(Order_Demand, na.rm = TRUE)) %>%
+    ungroup()
+  
+  # Letzte h Wochen bestimmen
+  last_weeks <- tail(filtered_df$Date, h)
+  
+  # Trainingsdaten: alle Wochen vor den letzten h Wochen
+  train_df <- filtered_df %>% filter(Date < min(last_weeks))
+  
+  # Prüfen, ob genug Daten vorhanden
+  if(nrow(train_df) < 2) return(NULL)
+  
+  # Zeitreihe erstellen
+  ts_data <- ts(train_df$Order_Demand, frequency = period)
+  
+  # ARIMA fit
+  fit <- tryCatch(
+    arima(ts_data, order = order, seasonal = list(order = seasonal, period = period)),
+    error = function(e) NULL
+  )
+  if(is.null(fit)) return(NULL)
+  
+  # Forecast für h Wochen
+  fc <- predict(fit, n.ahead = h)
+  
+  # Forecast-Tibble mit korrekten Wochenlabels
+  tibble(
+    Date = last_weeks + 1,
+    Lo = pmax(fc$pred - z * fc$se, 0),           # Non-negative lower bound
+    Hi = pmax(fc$pred + z * fc$se, 0),           # Non-negative upper bound
+    Forecast = pmax(as.numeric(fc$pred), 0)      # Non-negative Forecast
+  )
+}
+
+# --- Generate forecasts for all groups ---
+forecasts <- results %>%
+  filter(!is.na(p_value)) %>%
+  mutate(
+    forecast = pmap(
+      select(., any_of(c("Warehouse", "Product_Category", "model_result"))),
+      function(...){
+        args <- list(...)
+        wh <- if("Warehouse" %in% names(args)) args$Warehouse else NULL
+        pc <- if("Product_Category" %in% names(args)) args$Product_Category else NULL
+        mr <- args$model_result
+        
+        # refit_and_forecast auf Wochenbasis anpassen
+        refit_and_forecast(
+          df = data_wh_pc, 
+          warehouse = wh, 
+          product_category = pc,
+          order = mr$order, 
+          seasonal = mr$seasonal, 
+          h = 4,                   # Vorhersage für 4 Wochen
+          period = 13,              # saisonale Frequenz = 4 Wochen (optional)
+          level = 0.2
+        )
+      }
+    )
+  ) %>%
+  select(any_of(c("Warehouse", "Product_Category", "forecast"))) %>%
+  unnest(forecast)
+
+# --- Aggregate test data to match grouping level dynamically ---
+group_cols <- c()
+if(group_warehouse) group_cols <- c(group_cols, "Warehouse")
+if(group_product_category) group_cols <- c(group_cols, "Product_Category")
+
+# Aggregation auf die gewählten Gruppierungen + Datum
+agg_test_data <- test_data %>%
+  group_by(across(all_of(c(group_cols, "Date")))) %>%
+  summarise(Order_Demand = sum(Order_Demand, na.rm = TRUE),
+            .groups = "drop")
+
+# --- Vollständige Liste der Testtage ---
+all_dates <- seq(min(test_data$Date), max(test_data$Date), by = "week")
+
+# --- Vollständiges Grid: jede Gruppenkombination × jeder Tag ---
+test_eval <- agg_test_data %>%
+  tidyr::complete(
+    !!!rlang::syms(group_cols),  # dynamisch alle Gruppenspalten
+    Date = all_dates,
+    fill = list(Order_Demand = 0)
+  ) %>%
+  arrange(across(all_of(c(group_cols, "Date"))))
+
+# --- Evaluation ---
+evaluation <- forecasts %>%
+  left_join(test_eval, by = c(group_cols, "Date")) %>%
+  mutate(
+    error = Order_Demand - Forecast,
+    abs_error = abs(error),
+    sq_error = error^2
+  )
+
+# --- Metrics per group ---
+metrics <- evaluation %>%
+  group_by(across(all_of(group_cols))) %>%
+  summarise(
+    RMSE = sqrt(mean(sq_error, na.rm = TRUE)),
+    MAE  = mean(abs_error, na.rm = TRUE),
+    MAPE = mean(abs_error / Order_Demand, na.rm = TRUE) * 100,
     .groups = "drop"
   )
 
-#  Train/Test Split
-cutoff_date <- max(data_wh_pc$Date) - 28
+library(ggplot2)
+library(dplyr)
 
-train_data <- data_wh_pc %>% filter(Date <= cutoff_date)
-test_data <- data_wh_pc %>% filter(Date > cutoff_date)
+# --- Zusammenführen von Testdaten und Forecasts für Plot ---
+plot_data <- test_eval %>%
+  filter(Warehouse %in% unique(test_eval$Warehouse)) %>%
+  select(Warehouse, Date, Order_Demand) %>%
+  rename(Value = Order_Demand) %>%
+  mutate(Type = "Actual") %>%
+  bind_rows(
+    forecasts %>%
+      select(Warehouse, Date, Forecast) %>%
+      rename(Value = Forecast) %>%
+      mutate(Type = "Forecast")
+  )
 
-# ARIMA nur für Warehouse
-results <- run_arima_analysis(train_data, TRUE, FALSE, max_iter = 5)
+# --- Plot mit allen 4 Warehouses ---
+ggplot(plot_data, aes(x = Date, y = Value, color = Type)) +
+  geom_line(size = 1) +
+  facet_wrap(~ Warehouse, scales = "free_y") +  # 1 Plot pro Warehouse
+  labs(
+    title = "Order Demand vs Forecast per Warehouse",
+    x = "Week Start Date",
+    y = "Order Demand"
+  ) +
+  theme_minimal() +
+  scale_color_manual(values = c("Actual" = "black", "Forecast" = "blue"))
