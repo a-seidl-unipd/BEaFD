@@ -76,13 +76,15 @@ library(ggplot2)
 
 # 1. Testing H1 (Promotions): Boxplot of Demand by Promo status
 # We use a log scale because demand has huge outliers (some days are massive)
+png("impact-of-promotions-on-demand.png", width = 1200, height = 800, res = 150)
 ggplot(data, aes(x = Promo, y = Order_Demand, fill = Promo)) +
   geom_boxplot() +
   scale_y_log10() + 
   labs(title = "Hypothesis 1: Impact of Promotions on Demand",
        subtitle = "Comparing Demand on Promo vs. Non-Promo days",
        y = "Order Demand (Log Scale)", x = "Promotion Active") +
-  theme_minimal()
+  theme_minimal(base_size = 18) # Slightly smaller base_size for PNG clarity
+dev.off()
 
 # 2. Testing H2 (Petrol Price): Correlation Test
 # We calculate the correlation coefficient (r)
@@ -91,13 +93,15 @@ cor_test <- cor.test(data$Petrol_price, data$Order_Demand)
 print(cor_test)
 
 # Visualize Petrol Price vs Demand
+png("petrol-price-vs-demand.png", width = 1200, height = 800, res = 150)
 ggplot(data, aes(x = Petrol_price, y = Order_Demand)) +
   geom_point(alpha = 0.1, color = "blue") +
-  geom_smooth(method = "lm", color = "red") + # Adds a trend line
+  geom_smooth(method = "lm", color = "red") + 
   labs(title = "Hypothesis 2: Petrol Price vs. Demand",
        subtitle = paste("Correlation Coefficient:", round(cor_test$estimate, 4)),
        x = "Petrol Price", y = "Order Demand") +
-  theme_minimal()
+  theme_minimal(base_size = 18)
+dev.off()
 
 # 3. Testing H3 (Warehouse Variation): Mean Demand per Warehouse
 warehouse_summary <- data %>%
@@ -107,11 +111,13 @@ warehouse_summary <- data %>%
 
 print(warehouse_summary)
 
+png("mean-demand-by-warehouse.png", width = 1200, height = 800, res = 150)
 ggplot(warehouse_summary, aes(x = reorder(Warehouse, -Mean_Demand), y = Mean_Demand, fill = Warehouse)) +
   geom_bar(stat = "identity") +
   labs(title = "Hypothesis 3: Mean Demand by Warehouse",
        x = "Warehouse ID", y = "Average Daily Demand") +
-  theme_minimal()
+  theme_minimal(base_size = 18)
+dev.off()
 
 # --- Section 4: Time Series Analysis ---
 
@@ -134,8 +140,15 @@ ts_obj <- ts(daily_ts_data$Total_Demand, frequency = 7)
 decomp <- stl(ts_obj, s.window = "periodic")
 
 # 4. Plot the Decomposition
-plot(decomp, main = "Time Series Decomposition of Retail Demand", 
-     col = "darkblue", lwd = 2)
+png("time-series-decomposition.png", width = 1200, height = 1000, res = 150)
+plot(decomp, 
+     main = "Time Series Decomposition of Retail Demand", 
+     col = "darkblue", 
+     lwd = 2,
+     cex.main = 1.5,   
+     cex.lab = 1.2,    
+     cex.axis = 1.1)
+dev.off()
 
 # 5. Testing for Stationarity (ADF Test)
 # This is a standard "Financial Data" test. 
@@ -149,16 +162,24 @@ print(adf_test)
 # auto.arima finds the best mathematical parameters for your specific data
 fit_arima <- auto.arima(ts_obj)
 
+png("model-diagnostics.png", width = 1000, height = 800, res = 150)
+checkresiduals(fit_arima) # This generates 3 plots in 1: Time plot, ACF, and Histogram
+dev.off()
+
 # 2. Forecast the next 30 days
 forecast_30d <- forecast(fit_arima, h = 30)
 
 # 3. Plot the Forecast
-# This will show the history (line) and the future (shaded area)
+png("30-day-demand-forecast.png", width = 1200, height = 800, res = 150)
+par(mar = c(5, 5, 4, 2))
 plot(forecast_30d, 
      main = "30-Day Demand Forecast", 
      xlab = "Time (Weeks)", 
      ylab = "Total Demand",
-     col = "black", fcol = "red", shadecols = c("gray80", "gray90"))
+     col = "black", fcol = "red", 
+     shadecols = c("gray80", "gray90"),
+     cex.main = 1.5, cex.lab = 1.2, cex.axis = 1.1)
+dev.off()
 
 # 4. View the numerical values for your report
 print(forecast_30d)
