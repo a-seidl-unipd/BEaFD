@@ -1,4 +1,4 @@
-# Library required for grouping of data
+# Required libraries
 library(dplyr)
 library(tidyr)
 library(purrr)
@@ -40,7 +40,7 @@ data <- data %>%
     Order_Demand = sum(Order_Demand),
   ) %>%
   ungroup()
-
+# Turning the parameters of ARIMA into a function increasing the n-th of 6 parameters
 increment_arima_param <- function(order, seasonal, i) {
   if(i >= 1 && i <= 3) {
     order[i] <- order[i] + 1
@@ -50,56 +50,56 @@ increment_arima_param <- function(order, seasonal, i) {
   
   list(order = order, seasonal = seasonal)
 }
-
-select_best_candidate_simple <- function(ts_data, current_order, current_seasonal, lag_lb = 20, period = 7) {
+# Increasing every parameter by 1 while keeping the rest equal comparing the different p-values
+select_best_candidate_simple <- function(ts_data, current_order, current_seasonal, lag_lb = 4, period = 13) {
   
-  best_p <- -Inf
-  best_fit <- NULL
-  best_order <- current_order
-  best_seasonal <- current_seasonal
+  best_p <- -Inf # Base p-value
+  best_fit <- NULL # best ARIMA
+  best_order <- current_order # Best order array
+  best_seasonal <- current_seasonal # best seasonal array
   
   for(i in 1:6) {
     # Increment one parameter
     params <- increment_arima_param(current_order, current_seasonal, i)
     
-    # Try to fit ARIMA; if it fails, skip this candidate
+    # Trying ARIMA and catching errors in case of dysfunctional Model
     fit <- tryCatch(
       arima(ts_data, order = params$order, seasonal = list(order = params$seasonal, period = period)),
       error = function(e) NULL,
       warning = function(w) {
-        # convert warnings into NULL if you want to skip non-convergent fits
+        # Skipping non-convergent fits
         NULL
       }
     )
     
     if(!is.null(fit)) {
       # Compute Ljung-Box p-value
-      fitdf <- sum(params$order[c(1,3)]) + sum(params$seasonal[c(1,3)])  # p+q+P+Q
-      lb <- Box.test(residuals(fit), lag = lag_lb, type = "Ljung-Box", fitdf = fitdf)
+      fitdf <- sum(params$order[c(1,3)]) + sum(params$seasonal[c(1,3)])  # Sum of parameter values
+      lb <- Box.test(residuals(fit), lag = lag_lb, type = "Ljung-Box", fitdf = fitdf) # Ljung-Box p-value
       
       # Keep best p-value
       if(lb$p.value > best_p) {
-        best_p <- lb$p.value
-        best_fit <- fit
-        best_order <- params$order
-        best_seasonal <- params$seasonal
+        best_p <- lb$p.value # best p-value
+        best_fit <- fit # best fit
+        best_order <- params$order # best order array
+        best_seasonal <- params$seasonal # best seasonal array
       }
     }
-    # If fit is NULL (failed), just skip to next candidate
+    # Otherwise skip
   }
-  
+  # Returning best candidate
   return(list(fit = best_fit,
               order = best_order,
               seasonal = best_seasonal,
               p_value = best_p))
 }
 
-# Daily data, fill missing dates
+# Preparation of weekly data
 build_time_series <- function(df, warehouse = NULL, product_category = NULL,
-                              period = 7, p_value_threshold = 0.05, max_iter = 5,
-                              lag_lb = 20) {
+                              period = 13, p_value_threshold = 0.05, max_iter = 5,
+                              lag_lb = 4) {
   
-  # Filter only if arguments are provided
+  # Filter only if arguments are provided (necessary dependent on how is grouped)
   filtered_df <- df
   if(!is.null(warehouse)) {
     filtered_df <- filtered_df %>% filter(Warehouse == warehouse)
@@ -116,7 +116,7 @@ build_time_series <- function(df, warehouse = NULL, product_category = NULL,
       Date = seq(min(Date), max(Date), by = "day"),
       fill = list(Order_Demand = 0)
     )
-  
+  # Getting time series data
   ts_data <- ts(filtered_df$Order_Demand, frequency = period)
   
   # Initialize ARIMA parameters
@@ -129,22 +129,23 @@ build_time_series <- function(df, warehouse = NULL, product_category = NULL,
                                  lag_lb = lag_lb, period = period),
     error = function(e) NULL
   )
-  
+  # Return NA in case of misfit
   if(is.null(best$fit)) {
     return(list(fit = NULL, order = NA, seasonal = NA, p_value = NA))
   }
   
-  last_successful <- best  # Keep the last truly successful fit
-  iter <- 1
-  
+  last_successful <- best  # Keep the last successful fit
+  iter <- 1 # iteration counter
+  # Continuning until p_value is high enough or threshold of max_iter reached
   while(last_successful$p_value < p_value_threshold & iter <= max_iter) {
-    
+    # selecting best candidate for ARIMA
     temp <- tryCatch(
       select_best_candidate_simple(ts_data, last_successful$order, last_successful$seasonal,
                                    lag_lb = lag_lb, period = period),
       error = function(e) NULL
     )
-    
+    # Trying up to two times improving p-value
+    ## Idea of improving p-value even if last increase of best parameter lead to decrease
     if(!is.null(temp$fit)) {
       if(temp$p_value > last_successful$p_value) {
         last_successful <- temp
@@ -170,7 +171,7 @@ build_time_series <- function(df, warehouse = NULL, product_category = NULL,
   return(last_successful)
 }
 
-
+# ARIMA analysis
 run_arima_analysis <- function(df, 
                                group_warehouse = TRUE, 
                                group_product_category = TRUE, 
@@ -198,7 +199,7 @@ run_arima_analysis <- function(df,
         select(., all_of(group_cols)),
         function(...) {
           args <- list(...)
-          # Extract warehouse/product if present, else NULL
+          # Extract warehouse or product group if present
           wh <- if("Warehouse" %in% names(args)) args$Warehouse else NULL
           pc <- if("Product_Category" %in% names(args)) args$Product_Category else NULL
           
@@ -208,6 +209,7 @@ run_arima_analysis <- function(df,
         }
       )
     ) %>%
+    # add order array, seasonal array and p-value
     mutate(
       order = map(model_result, "order"),
       seasonal = map(model_result, "seasonal"),
@@ -220,9 +222,10 @@ run_arima_analysis <- function(df,
 # Grouping after Warehouse and Product Category by Date
 data_wh_pc <- data %>%
   mutate(
-    # Woche beginnt Montag, Date = Montag der Woche
+    # Week starting with Monday
     Date = floor_date(Date, unit = "week", week_start = 1)
   ) %>%
+  # Group data by warehouse, product_category, date with sum of order_demand
   group_by(Warehouse, Product_Category, Date) %>%
   summarise(
     Order_Demand = sum(Order_Demand, na.rm = TRUE),
@@ -230,8 +233,8 @@ data_wh_pc <- data %>%
   ) %>%
   arrange(Warehouse, Product_Category, Date)
 
-# --- Train/Test Split ---
-cutoff_date <- max(data_wh_pc$Date) - weeks(4)  # letzte 4 Wochen als Test
+# Train/Test Split
+cutoff_date <- max(data_wh_pc$Date) - weeks(4)  # last 4 weeks for comparison
 
 train_data <- data_wh_pc %>% filter(Date <= cutoff_date)
 test_data  <- data_wh_pc %>% filter(Date > cutoff_date)
@@ -245,23 +248,23 @@ results <- run_arima_analysis(
   train_data,
   group_warehouse = group_warehouse,
   group_product_category = group_product_category,
-  p_value_threshold = 0.8,
+  p_value_threshold = 0.2,
   max_iter = 5,
   lag_lb = 4
 )
-
+# Refitting and forecasting
 refit_and_forecast <- function(df, warehouse = NULL, product_category = NULL,
                                       order, seasonal, h = 4, period = 13, level = 0.2) {
   
-  # z-Score für Konfidenzintervall
+  # z-Score for confidence interval
   z <- qnorm(0.5 + level / 2)
   
-  # Filter für Warehouse / Product_Category
+  # Filter for Warehouse/Product_Category
   filtered_df <- df
   if(!is.null(warehouse)) filtered_df <- filtered_df %>% filter(Warehouse == warehouse)
   if(!is.null(product_category)) filtered_df <- filtered_df %>% filter(Product_Category == product_category)
   
-  # Wochenaggregation
+  # Weekly aggregation
   filtered_df <- filtered_df %>%
     arrange(Date) %>%
     mutate(Date = lubridate::floor_date(Date, "week")) %>%
@@ -269,16 +272,16 @@ refit_and_forecast <- function(df, warehouse = NULL, product_category = NULL,
     summarise(Order_Demand = sum(Order_Demand, na.rm = TRUE)) %>%
     ungroup()
   
-  # Letzte h Wochen bestimmen
+  # last h weeks
   last_weeks <- tail(filtered_df$Date, h)
   
-  # Trainingsdaten: alle Wochen vor den letzten h Wochen
+  # Weeks before as training data
   train_df <- filtered_df %>% filter(Date < min(last_weeks))
   
-  # Prüfen, ob genug Daten vorhanden
+  # Check for enough data being available
   if(nrow(train_df) < 2) return(NULL)
   
-  # Zeitreihe erstellen
+  # Time row creation
   ts_data <- ts(train_df$Order_Demand, frequency = period)
   
   # ARIMA fit
@@ -288,12 +291,12 @@ refit_and_forecast <- function(df, warehouse = NULL, product_category = NULL,
   )
   if(is.null(fit)) return(NULL)
   
-  # Forecast für h Wochen
+  # Forecast for n weeks
   fc <- predict(fit, n.ahead = h)
   
-  # Forecast-Tibble mit korrekten Wochenlabels
+  # Forecast-Tibble
   tibble(
-    Date = last_weeks + 1,
+    Date = last_weeks + 1, # Shift due to first prediction date being 30.10.2016 instead of 31.10.2026
     Lo = pmax(fc$pred - z * fc$se, 0),           # Non-negative lower bound
     Hi = pmax(fc$pred + z * fc$se, 0),           # Non-negative upper bound
     Forecast = pmax(as.numeric(fc$pred), 0)      # Non-negative Forecast
@@ -312,15 +315,15 @@ forecasts <- results %>%
         pc <- if("Product_Category" %in% names(args)) args$Product_Category else NULL
         mr <- args$model_result
         
-        # refit_and_forecast auf Wochenbasis anpassen
+        # refit_and_forecast on weekly base
         refit_and_forecast(
           df = data_wh_pc, 
           warehouse = wh, 
           product_category = pc,
           order = mr$order, 
           seasonal = mr$seasonal, 
-          h = 4,                   # Vorhersage für 4 Wochen
-          period = 13,              # saisonale Frequenz = 4 Wochen (optional)
+          h = 4,                   # Prediction for 4 weeks
+          period = 13,              # Seasonal frequency (quarterly and optional)
           level = 0.2
         )
       }
@@ -334,25 +337,25 @@ group_cols <- c()
 if(group_warehouse) group_cols <- c(group_cols, "Warehouse")
 if(group_product_category) group_cols <- c(group_cols, "Product_Category")
 
-# Aggregation auf die gewählten Gruppierungen + Datum
+# Aggregation of test_data based on split
 agg_test_data <- test_data %>%
   group_by(across(all_of(c(group_cols, "Date")))) %>%
   summarise(Order_Demand = sum(Order_Demand, na.rm = TRUE),
             .groups = "drop")
 
-# --- Vollständige Liste der Testtage ---
+# Filling dates in case of empty spaces in test_data
 all_dates <- seq(min(test_data$Date), max(test_data$Date), by = "week")
 
-# --- Vollständiges Grid: jede Gruppenkombination × jeder Tag ---
+# --- Full grid of evaluation data
 test_eval <- agg_test_data %>%
   tidyr::complete(
-    !!!rlang::syms(group_cols),  # dynamisch alle Gruppenspalten
+    !!!rlang::syms(group_cols),  # completing dynamically through the grouped data
     Date = all_dates,
     fill = list(Order_Demand = 0)
   ) %>%
   arrange(across(all_of(c(group_cols, "Date"))))
 
-# --- Evaluation ---
+# Grouping to Evaluation data (forecasts joined with test_eval)
 evaluation <- forecasts %>%
   left_join(test_eval, by = c(group_cols, "Date")) %>%
   mutate(
@@ -361,7 +364,7 @@ evaluation <- forecasts %>%
     sq_error = error^2
   )
 
-# --- Metrics per group ---
+# Metrics per row (RMSE, MAE, MAPE)
 metrics <- evaluation %>%
   group_by(across(all_of(group_cols))) %>%
   summarise(
@@ -371,23 +374,22 @@ metrics <- evaluation %>%
     .groups = "drop"
   )
 
+# Only for case of grouping on warehouse level
 library(ggplot2)
 library(dplyr)
 
-# --- Zusammenführen von Testdaten und Forecasts für Plot ---
-plot_data <- test_eval %>%
-  filter(Warehouse %in% unique(test_eval$Warehouse)) %>%
-  select(Warehouse, Date, Order_Demand) %>%
-  rename(Value = Order_Demand) %>%
-  mutate(Type = "Actual") %>%
-  bind_rows(
-    forecasts %>%
-      select(Warehouse, Date, Forecast) %>%
-      rename(Value = Forecast) %>%
-      mutate(Type = "Forecast")
-  )
+# Plotting using data in evaluation 
+plot_data <- evaluation %>%
+  pivot_longer(
+    cols = c(Order_Demand, Forecast),
+    names_to = "Type",
+    values_to = "Value"
+  ) %>%
+  mutate(Type = recode(Type,
+                       Order_Demand = "Actual",
+                       Forecast = "Forecast"))
 
-# --- Plot mit allen 4 Warehouses ---
+# Plot with all four warehouses
 ggplot(plot_data, aes(x = Date, y = Value, color = Type)) +
   geom_line(size = 1) +
   facet_wrap(~ Warehouse, scales = "free_y") +  # 1 Plot pro Warehouse
