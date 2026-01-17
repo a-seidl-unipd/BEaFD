@@ -166,7 +166,7 @@ print(adf_test)
 # auto.arima finds the best mathematical parameters for your specific data
 fit_arima <- auto.arima(ts_obj)
 
-png("./Projekt/Data/model-diagnostics.png", width = 1000, height = 800, res = 150)
+# png("./Projekt/Data/model-diagnostics.png", width = 1000, height = 800, res = 150)
 checkresiduals(fit_arima) # This generates 3 plots in 1: Time plot, ACF, and Histogram
 # dev.off()
 
@@ -541,6 +541,7 @@ plot_data <- evaluation %>%
                        Forecast = "Forecast"))
 
 # Plot with all four warehouses
+# png("./Projekt/Data/Custom-Auto-ARIMA.png", width = 1000, height = 800, res = 150)
 ggplot(plot_data, aes(x = Date, y = Value, color = Type)) +
   geom_line(linewidth = 1) +
   facet_wrap(~ Warehouse, scales = "free_y") +  # 1 Plot pro Warehouse
@@ -551,3 +552,4 @@ ggplot(plot_data, aes(x = Date, y = Value, color = Type)) +
   ) +
   theme_minimal() +
   scale_color_manual(values = c("Actual" = "black", "Forecast" = "blue"))
+# dev.off()
